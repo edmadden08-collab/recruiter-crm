@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Recruiter CRM — Edward Madden</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans','Segoe UI',sans-serif;background:#0F1419;color:#E8ECF1;min-height:100vh}
+input,select,textarea,button{font-family:inherit}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:#1A1F2E}
+::-webkit-scrollbar-thumb{background:#3A4255;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useMemo} = React;
+
+const STAGES=["Pending Connection","Connection","Intro Call","Active","Inactive","Do Not Contact"];
+const PRIORITIES=["High","Medium","Low"];
+const CHANNELS=["LinkedIn","Email","Phone","InMail","SMS","Other"];
+const SCHED_FILTER_CHANNELS=["All","LinkedIn","Email","Phone","SMS"];
+const WARMTH_LABELS={5:"Hot",4:"Warm",3:"Moderate",2:"Cool",1:"Cold",0:"Unscored"};
+const WARMTH_COLORS={Hot:"#E74C3C",Warm:"#F39C12",Moderate:"#F1C40F",Cool:"#3498DB",Cold:"#95A5A6",Unscored:"#BDC3C7"};
+const JOB_STATUSES=["New","Applied","Interview","Offer","Closed"];
+const KEEP_WARM_INTERVALS={"Weekly":7,"Fortnightly":14,"Monthly":30,"Quarterly":90};
+const ACTIVITY_TYPES=["Outreach","Follow-up","Call","Meeting","Email Sent","Email Received","LinkedIn Message","InMail","SMS","Referral","Note"];
+
+const uid=()=>Math.random().toString(36).slice(2,10);
+const today=()=>new Date().toISOString().split("T")[0];
+const daysSince=d=>d?Math.floor((Date.now()-new Date(d).getTime())/86400000):null;
+const fmt=d=>d?new Date(d).toLocaleDateString("en-GB",{day:"numeric",month:"short",year:"2-digit"}):"—";
+const isOverdue=d=>d&&d<today();
+const isToday=d=>d===today();
+
+const defaultContact=()=>({id:uid(),firstName:"",lastName:"",position:"",company:"",linkedinUrl:"",email:"",phone:"",connectedOn:"",stage:"Connection",priority:"Medium",warmthScore:1,contactLevel:"",lastContactYear:"",notes:"",suggestedAction:"",originalStatus:"",createdAt:today(),segment:"General"});
+const defaultActivity=()=>({id:uid(),contactId:"",date:today(),channel:"LinkedIn",type:"Outreach",notes:"",outcome:""});
+const defaultScheduled=()=>({id:uid(),contactId:"",date:"",time:"09:00",channel:"LinkedIn",type:"Outreach",objective:"",completed:false,completedDate:"",notes:"",outcome:""});
+const defaultJob=()=>({id:uid(),contactId:"",jobTitle:"",company:"",remuneration:"",roleSummary:"",status:"New",dateAdded:today(),dateUpdated:today()});
+
+// ─── LocalStorage helpers ───
+const lsGet=k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null}catch{return null}};
+const lsSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v))}catch(e){console.error("LS error:",e)}};
+
+// ─── Supabase ───
+const SUPA_URL="https://iywivpjkzipaeqeqnisx.supabase.co";
+const SUPA_KEY="sb_publishable_GG75DhZqlvRwu2L2QGOVSA_7KYxKPCM";
+const SUPA_H={"apikey":SUPA_KEY,"Authorization":`Bearer ${SUPA_KEY}`,"Content-Type":"application/json","Accept":"application/json"};
+const TABLES=["contacts","activities","scheduled","jobs","campaigns"];
+
+const supaRead=async t=>{const r=await fetch(`${SUPA_URL}/rest/v1/${t}?select=*`,{headers:SUPA_H});if(!r.ok)throw new Error(`Read ${t}: ${r.status}`);return r.json()};
+const supaUpsert=async(t,recs)=>{if(!recs||!recs.length)return;const r=await fetch(`${SUPA_URL}/rest/v1/${t}`,{method:"POST",headers:{...SUPA_H,"Prefer":"resolution=merge-duplicates,return=minimal"},body:JSON.stringify(recs)});if(!r.ok)throw new Error(`Upsert ${t}: ${r.status} ${await r.text()}`)};
+const supaDeleteAll=async t=>{const r=await fetch(`${SUPA_URL}/rest/v1/${t}?id=not.is.null`,{method:"DELETE",headers:{...SUPA_H,"Prefer":"return=minimal"}});if(!r.ok)throw new Error(`Delete ${t}: ${r.status}`)};
+const supaPing=async()=>{const r=await fetch(`${SUPA_URL}/rest/v1/contacts?select=id&limit=1`,{headers:{"apikey":SUPA_KEY,"Accept":"application/json"}});return r.ok};
+
+// ─── Styles ───
+const C={bg:"#0F1419",sf:"#1A1F2E",sa:"#232A3B",bd:"#2A3142",tx:"#E8ECF1",tm:"#8892A4",ac:"#4A9EFF",su:"#2ECC71",wa:"#F39C12",da:"#E74C3C",sp:"#8B5CF6",sc:"#3B82F6",si:"#F59E0B",sac:"#10B981",sin:"#6B7280",sd:"#EF4444"};
+const stC={"Pending Connection":C.sp,Connection:C.sc,"Intro Call":C.si,Active:C.sac,Inactive:C.sin,"Do Not Contact":C.sd};
+const base={fontFamily:"'DM Sans','Segoe UI',sans-serif",color:C.tx,boxSizing:"border-box"};
+const card={...base,background:C.sf,borderRadius:10,border:`1px solid ${C.bd}`};
+const inp={...base,background:C.sa,border:`1px solid ${C.bd}`,borderRadius:6,padding:"8px 12px",fontSize:13,width:"100%",outline:"none",color:C.tx};
+const btn=(v="primary")=>({...base,border:"none",borderRadius:6,padding:"8px 16px",fontSize:13,fontWeight:600,cursor:"pointer",transition:"all 0.15s",...(v==="primary"?{background:C.ac,color:"#fff"}:v==="danger"?{background:C.da,color:"#fff"}:{background:C.sa,color:C.tx,border:`1px solid ${C.bd}`})});
+const bdg=c=>({display:"inline-block",padding:"2px 10px",borderRadius:99,fontSize:11,fontWeight:600,background:c+"22",color:c});
+
+function Modal({open,onClose,title,children,width=520}){if(!open)return null;return <div style={{position:"fixed",inset:0,zIndex:999,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(0,0,0,0.6)",backdropFilter:"blur(4px)"}} onClick={onClose}><div style={{...card,padding:24,width,maxWidth:"95vw",maxHeight:"85vh",overflowY:"auto",boxShadow:"0 20px 60px rgba(0,0,0,0.5)"}} onClick={e=>e.stopPropagation()}><div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}><h3 style={{margin:0,fontSize:18,fontWeight:700}}>{title}</h3><button onClick={onClose} style={{...btn("ghost"),padding:"4px 10px",fontSize:18}}>×</button></div>{children}</div></div>}
+function Field({label,children}){return <div style={{marginBottom:14}}><label style={{fontSize:11,fontWeight:600,color:C.tm,textTransform:"uppercase",letterSpacing:0.8,marginBottom:4,display:"block"}}>{label}</label>{children}</div>}
+function Pill({label,color,active,onClick}){return <button onClick={onClick} style={{...bdg(color),cursor:"pointer",border:active?`2px solid ${color}`:"2px solid transparent",opacity:active?1:0.5,padding:"4px 12px",fontSize:12}}>{label}</button>}
+function Tab({label,active,onClick,count,dot}){return <button onClick={onClick} style={{...base,background:"none",border:"none",borderBottom:active?`2px solid ${C.ac}`:"2px solid transparent",color:active?C.ac:C.tm,padding:"10px 16px",fontSize:13,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",gap:6}}>{label}{dot&&<span style={{width:8,height:8,borderRadius:99,background:C.da,display:"inline-block"}}/>}{count!=null&&<span style={{background:active?C.ac+"22":C.sa,color:active?C.ac:C.tm,borderRadius:99,padding:"1px 8px",fontSize:11}}>{count}</span>}</button>}
+function WarmthDot({score}){const l=WARMTH_LABELS[score]||"Unscored";const c=WARMTH_COLORS[l]||WARMTH_COLORS.Unscored;return <span style={{display:"inline-flex",alignItems:"center",gap:4}}><span style={{width:10,height:10,borderRadius:99,background:c,boxShadow:`0 0 6px ${c}66`}}/><span style={{fontSize:11,color:c,fontWeight:600}}>{l}</span></span>}
+function Checkbox({checked,onChange}){return <span onClick={e=>{e.stopPropagation();onChange(!checked)}} style={{width:18,height:18,borderRadius:4,border:`2px solid ${checked?C.su:C.bd}`,background:checked?C.su:"transparent",display:"inline-flex",alignItems:"center",justifyContent:"center",cursor:"pointer"}}>{checked&&<span style={{color:"#fff",fontSize:12,fontWeight:700}}>✓</span>}</span>}
+
+function App(){
+  const [contacts,setContacts]=useState([]);
+  const [activities,setActivities]=useState([]);
+  const [scheduled,setScheduled]=useState([]);
+  const [jobs,setJobs]=useState([]);
+  const [campaigns,setCampaigns]=useState([]);
+  const [segments]=useState(["General","Executive Search","Recruitment Agency","Interim Specialist"]);
+  const [loaded,setLoaded]=useState(false);
+  const [view,setView]=useState("pipeline");
+  const [search,setSearch]=useState("");
+  const [stageFilter,setStageFilter]=useState("All");
+  const [schedFilter,setSchedFilter]=useState("All");
+  const [editContact,setEditContact]=useState(null);
+  const [editActivity,setEditActivity]=useState(null);
+  const [editScheduled,setEditScheduled]=useState(null);
+  const [editJob,setEditJob]=useState(null);
+  const [editCampaign,setEditCampaign]=useState(null);
+  const [detailContact,setDetailContact]=useState(null);
+  const [importModal,setImportModal]=useState(false);
+  const [confirmReset,setConfirmReset]=useState(false);
+  const [syncStatus,setSyncStatus]=useState("idle");
+  const [syncMsg,setSyncMsg]=useState("");
+  const [lastSync,setLastSync]=useState(null);
+
+  // Load from localStorage
+  useEffect(()=>{
+    const c=lsGet("crm-contacts"),a=lsGet("crm-activities"),s=lsGet("crm-scheduled"),j=lsGet("crm-jobs"),cm=lsGet("crm-campaigns"),ls=lsGet("crm-lastSync");
+    if(c)setContacts(c);if(a)setActivities(a);if(s)setScheduled(s);if(j)setJobs(j);if(cm)setCampaigns(cm);if(ls)setLastSync(ls);
+    setLoaded(true);
+  },[]);
+
+  // Save to localStorage
+  useEffect(()=>{if(loaded)lsSet("crm-contacts",contacts)},[contacts,loaded]);
+  useEffect(()=>{if(loaded)lsSet("crm-activities",activities)},[activities,loaded]);
+  useEffect(()=>{if(loaded)lsSet("crm-scheduled",scheduled)},[scheduled,loaded]);
+  useEffect(()=>{if(loaded)lsSet("crm-jobs",jobs)},[jobs,loaded]);
+  useEffect(()=>{if(loaded)lsSet("crm-campaigns",campaigns)},[campaigns,loaded]);
+
+  // CRUD
+  const saveContact=c=>{setContacts(p=>{const i=p.findIndex(x=>x.id===c.id);return i>=0?p.map(x=>x.id===c.id?c:x):[...p,c]});setEditContact(null)};
+  const deleteContact=id=>{setContacts(p=>p.filter(x=>x.id!==id));setActivities(p=>p.filter(x=>x.contactId!==id));setScheduled(p=>p.filter(x=>x.contactId!==id));setJobs(p=>p.filter(x=>x.contactId!==id));setDetailContact(null)};
+  const saveActivity=a=>{setActivities(p=>{const i=p.findIndex(x=>x.id===a.id);return i>=0?p.map(x=>x.id===a.id?a:x):[...p,a]});setEditActivity(null)};
+  const deleteActivity=id=>setActivities(p=>p.filter(x=>x.id!==id));
+  const saveScheduledItem=s=>{setScheduled(p=>{const i=p.findIndex(x=>x.id===s.id);return i>=0?p.map(x=>x.id===s.id?s:x):[...p,s]});setEditScheduled(null)};
+  const deleteScheduledItem=id=>setScheduled(p=>p.filter(x=>x.id!==id));
+  const completeScheduledItem=item=>{
+    setActivities(p=>[...p,{id:uid(),contactId:item.contactId,date:today(),channel:item.channel,type:item.type,notes:item.objective+(item.notes?` — ${item.notes}`:""),outcome:item.outcome||""}]);
+    setScheduled(p=>p.map(x=>x.id===item.id?{...x,completed:true,completedDate:today()}:x));
+  };
+  const uncompleteScheduledItem=id=>setScheduled(p=>p.map(x=>x.id===id?{...x,completed:false,completedDate:""}:x));
+  const saveJob=j=>{j.dateUpdated=today();setJobs(p=>{const i=p.findIndex(x=>x.id===j.id);return i>=0?p.map(x=>x.id===j.id?j:x):[...p,j]});setEditJob(null)};
+  const deleteJob=id=>setJobs(p=>p.filter(x=>x.id!==id));
+  const saveCampaign=c=>{setCampaigns(p=>{const i=p.findIndex(x=>x.id===c.id);return i>=0?p.map(x=>x.id===c.id?c:x):[...p,c]});setEditCampaign(null)};
+
+  // Cloud sync
+  const pushToCloud=async()=>{
+    setSyncStatus("syncing");setSyncMsg("Pushing to Supabase...");
+    try{
+      const data={contacts,activities,scheduled,jobs,campaigns};
+      for(const t of TABLES){await supaDeleteAll(t);if(data[t]&&data[t].length>0){for(let i=0;i<data[t].length;i+=100)await supaUpsert(t,data[t].slice(i,i+100))}}
+      const now=new Date().toLocaleString("en-GB");setLastSync(now);lsSet("crm-lastSync",now);
+      setSyncStatus("success");setSyncMsg(`Pushed ${contacts.length} contacts, ${activities.length} activities, ${scheduled.length} scheduled, ${jobs.length} jobs, ${campaigns.length} campaigns`);
+    }catch(e){setSyncStatus("error");setSyncMsg(e.message)}
+  };
+  const pullFromCloud=async()=>{
+    setSyncStatus("syncing");setSyncMsg("Pulling from Supabase...");
+    try{
+      const[c,a,s,j,cm]=await Promise.all(TABLES.map(t=>supaRead(t)));
+      if(c)setContacts(c);if(a)setActivities(a);if(s)setScheduled(s);if(j)setJobs(j);if(cm)setCampaigns(cm);
+      const now=new Date().toLocaleString("en-GB");setLastSync(now);lsSet("crm-lastSync",now);
+      setSyncStatus("success");setSyncMsg(`Pulled ${c.length} contacts, ${a.length} activities, ${s.length} scheduled, ${j.length} jobs, ${cm.length} campaigns`);
+    }catch(e){setSyncStatus("error");setSyncMsg(e.message)}
+  };
+  const testConn=async()=>{
+    setSyncStatus("syncing");setSyncMsg("Testing...");
+    try{const ok=await supaPing();setSyncStatus(ok?"success":"error");setSyncMsg(ok?"Connected to Supabase":"Connection failed")}
+    catch(e){setSyncStatus("error");setSyncMsg(e.message)}
+  };
+
+  // Filtering
+  const searchFiltered=useMemo(()=>{if(!search)return contacts;const s=search.toLowerCase();return contacts.filter(c=>[c.firstName,c.lastName,c.company,c.position,c.email,c.phone,c.segment,c.notes].some(f=>(f||"").toLowerCase().includes(s)))},[contacts,search]);
+  const filtered=useMemo(()=>stageFilter==="All"?searchFiltered:searchFiltered.filter(c=>c.stage===stageFilter),[searchFiltered,stageFilter]);
+  const overdueS=useMemo(()=>scheduled.filter(s=>!s.completed&&isOverdue(s.date)).sort((a,b)=>a.date.localeCompare(b.date)),[scheduled]);
+  const upcomingS=useMemo(()=>scheduled.filter(s=>!s.completed&&!isOverdue(s.date)).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time)),[scheduled]);
+  const completedS=useMemo(()=>scheduled.filter(s=>s.completed).sort((a,b)=>b.completedDate.localeCompare(a.completedDate)),[scheduled]);
+  const hasOverdue=overdueS.length>0;
+
+  // CSV Import
+  const parseCSV=line=>{const r=[];let cur="",q=false;for(let i=0;i<line.length;i++){const ch=line[i];if(ch==='"')q=!q;else if(ch===','&&!q){r.push(cur.trim());cur=""}else cur+=ch}r.push(cur.trim());return r};
+  const handleImport=text=>{
+    const lines=text.split(/\r?\n/).filter(l=>l.trim());if(lines.length<2)return;
+    const hdrs=parseCSV(lines[0]);const map={};
+    hdrs.forEach((h,i)=>{const hl=h.toLowerCase().replace(/[^a-z]/g,"");
+      if(hl.includes("first"))map.firstName=i;else if(hl.includes("last"))map.lastName=i;
+      else if(hl.includes("position")||hl.includes("jobtitle"))map.position=i;else if(hl.includes("company")||hl.includes("org"))map.company=i;
+      else if(hl.includes("linkedin")||hl.includes("url"))map.linkedinUrl=i;else if(hl.includes("email"))map.email=i;
+      else if(hl.includes("phone"))map.phone=i;else if(hl.includes("connected"))map.connectedOn=i;
+      else if(hl.includes("stage"))map.stage=i;else if(hl.includes("priority"))map.priority=i;
+      else if(hl==="score"||hl==="warmthscore")map.warmthScore=i;else if(hl.includes("contactlevel"))map.contactLevel=i;
+      else if(hl.includes("segment")||hl.includes("category"))map.segment=i;else if(hl.includes("note"))map.notes=i;
+    });
+    let n=0;const nc=[];
+    for(let i=1;i<lines.length;i++){const v=parseCSV(lines[i]);if(v.length<2)continue;const c=defaultContact();
+      if(map.firstName!=null)c.firstName=v[map.firstName]||"";if(map.lastName!=null)c.lastName=v[map.lastName]||"";
+      if(map.position!=null)c.position=v[map.position]||"";if(map.company!=null)c.company=v[map.company]||"";
+      if(map.linkedinUrl!=null)c.linkedinUrl=v[map.linkedinUrl]||"";if(map.email!=null)c.email=v[map.email]||"";
+      if(map.phone!=null)c.phone=v[map.phone]||"";if(map.connectedOn!=null)c.connectedOn=v[map.connectedOn]||"";
+      if(map.stage!=null&&STAGES.includes(v[map.stage]))c.stage=v[map.stage];if(map.priority!=null&&PRIORITIES.includes(v[map.priority]))c.priority=v[map.priority];
+      if(map.warmthScore!=null)c.warmthScore=parseInt(v[map.warmthScore])||1;if(map.contactLevel!=null)c.contactLevel=v[map.contactLevel]||"";
+      if(map.segment!=null)c.segment=v[map.segment]||"General";if(map.notes!=null)c.notes=v[map.notes]||"";
+      if(c.firstName||c.lastName){nc.push(c);n++}
+    }
+    setContacts(p=>[...p,...nc]);setImportModal(false);alert(`Imported ${n} contacts.`);
+  };
+  const exportCSV=()=>{
+    const h=["First Name","Last Name","Position","Company","LinkedIn URL","Email","Phone","Connected On","Stage","Priority","Warmth Score","Contact Level","Segment","Notes"];
+    const rows=contacts.map(c=>[c.firstName,c.lastName,c.position,c.company,c.linkedinUrl,c.email,c.phone||"",c.connectedOn,c.stage,c.priority,c.warmthScore,c.contactLevel,c.segment,c.notes].map(v=>`"${(v||"").toString().replace(/"/g,'""')}"`).join(","));
+    const blob=new Blob([[h.join(","),...rows].join("\n")],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`crm_contacts_${today()}.csv`;a.click();
+  };
+  const exportJobs=()=>{
+    const h=["Job Title","Company","Remuneration","Role Summary","Status","Contact","Date Added"];
+    const rows=jobs.map(j=>{const c=contacts.find(x=>x.id===j.contactId);return[j.jobTitle,j.company,j.remuneration,j.roleSummary,j.status,c?`${c.firstName} ${c.lastName}`:"",j.dateAdded].map(v=>`"${(v||"").toString().replace(/"/g,'""')}"`).join(",")});
+    const blob=new Blob([[h.join(","),...rows].join("\n")],{type:"text/csv"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`crm_jobs_${today()}.csv`;a.click();
+  };
+  const handleReset=()=>{setContacts([]);setActivities([]);setScheduled([]);setJobs([]);setCampaigns([]);["crm-contacts","crm-activities","crm-scheduled","crm-jobs","crm-campaigns","crm-lastSync"].forEach(k=>localStorage.removeItem(k));setConfirmReset(false)};
+
+  // Stats
+  const stats={total:contacts.length,byStage:STAGES.reduce((a,s)=>({...a,[s]:contacts.filter(c=>c.stage===s).length}),{}),
+    emailsCaptured:contacts.filter(c=>c.email).length,activeHigh:contacts.filter(c=>c.stage==="Active"&&c.priority==="High").length,
+    activeMed:contacts.filter(c=>c.stage==="Active"&&c.priority==="Medium").length,activeLow:contacts.filter(c=>c.stage==="Active"&&c.priority==="Low").length,
+    recentActs:[...activities].sort((a,b)=>b.date.localeCompare(a.date)).slice(0,10),
+    overdueFollowups:contacts.filter(c=>{if(["Inactive","Do Not Contact","Pending Connection"].includes(c.stage))return false;const la=activities.filter(a=>a.contactId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0];return!la||daysSince(la.date)>30}),
+    jobsByStatus:JOB_STATUSES.reduce((a,s)=>({...a,[s]:jobs.filter(j=>j.status===s).length}),{}),totalJobs:jobs.length,
+    warmthDist:Object.entries(WARMTH_LABELS).reduce((a,[s,l])=>({...a,[l]:contacts.filter(c=>c.warmthScore===parseInt(s)).length}),{}),
+    schedCount:scheduled.filter(s=>!s.completed).length,overdueCount:overdueS.length};
+
+  if(!loaded)return <div style={{height:"100vh",display:"flex",alignItems:"center",justifyContent:"center",color:C.tm}}>Loading CRM…</div>;
+
+  // Scheduled row component
+  const SchedRow=({item,showContact=true})=>{
+    const c=contacts.find(x=>x.id===item.contactId);const od=!item.completed&&isOverdue(item.date);const td=!item.completed&&isToday(item.date);
+    return <div style={{display:"flex",alignItems:"center",gap:12,padding:"10px 14px",borderBottom:`1px solid ${C.bd}`,background:od?C.da+"11":td?C.wa+"11":"transparent",borderLeft:od?`3px solid ${C.da}`:td?`3px solid ${C.wa}`:"3px solid transparent"}}>
+      <Checkbox checked={item.completed} onChange={v=>{if(v)completeScheduledItem(item);else uncompleteScheduledItem(item.id)}}/>
+      <div style={{width:85,flexShrink:0}}><div style={{fontSize:12,fontWeight:600,color:od?C.da:td?C.wa:C.tx}}>{fmt(item.date)}</div><div style={{fontSize:11,color:C.tm}}>{item.time}</div></div>
+      {showContact&&<div style={{flex:1,minWidth:0,cursor:"pointer"}} onClick={()=>c&&setDetailContact(c)}><div style={{fontSize:12,fontWeight:600,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c?`${c.firstName} ${c.lastName}`:"Unknown"}</div><div style={{fontSize:11,color:C.tm}}>{c?c.company:""}</div></div>}
+      <div style={{width:80,flexShrink:0}}><span style={{...bdg(item.channel==="LinkedIn"?C.ac:item.channel==="Email"?C.su:item.channel==="Phone"?C.wa:C.sp),fontSize:10}}>{item.channel}</span></div>
+      <div style={{flex:1,fontSize:12,color:item.completed?C.tm:C.tx,textDecoration:item.completed?"line-through":"none"}}>{item.objective||item.type}</div>
+      {od&&<span style={{...bdg(C.da),fontSize:10}}>Overdue</span>}
+      {td&&<span style={{...bdg(C.wa),fontSize:10}}>Today</span>}
+      <div style={{display:"flex",gap:4}}><button onClick={()=>setEditScheduled({...item})} style={{...btn("ghost"),padding:"4px 8px",fontSize:11}}>Edit</button><button onClick={()=>{if(confirm("Delete?"))deleteScheduledItem(item.id)}} style={{...btn("ghost"),padding:"4px 8px",fontSize:11,color:C.da}}>✕</button></div>
+    </div>;
+  };
+
+  return <div style={{minHeight:"100vh"}}>
+    {/* Header */}
+    <div style={{background:C.sf,borderBottom:`1px solid ${C.bd}`,padding:"12px 24px",display:"flex",alignItems:"center",justifyContent:"space-between",position:"sticky",top:0,zIndex:100}}>
+      <div style={{display:"flex",alignItems:"center",gap:12}}>
+        <div style={{width:32,height:32,borderRadius:8,background:`linear-gradient(135deg,${C.ac},#7C3AED)`,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:14,color:"#fff"}}>EM</div>
+        <div><div style={{fontSize:16,fontWeight:700}}>Recruiter CRM</div><div style={{fontSize:11,color:C.tm}}>Edward Madden — Talent Network</div></div>
+      </div>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        <div style={{position:"relative",display:"inline-flex",alignItems:"center",gap:8}}>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Type to search…" style={{...inp,width:200,fontSize:12,paddingRight:search?28:12,border:search?`1px solid ${C.ac}`:`1px solid ${C.bd}`}}/>
+          {search&&<button onClick={()=>setSearch("")} style={{position:"absolute",right:6,background:"none",border:"none",color:C.tm,cursor:"pointer",fontSize:14}}>×</button>}
+          {search&&<span style={{fontSize:11,color:C.ac,fontWeight:600,whiteSpace:"nowrap"}}>{searchFiltered.length} found</span>}
+        </div>
+        <button onClick={()=>setEditContact(defaultContact())} style={btn("primary")}>+ Contact</button>
+        <button onClick={()=>setEditScheduled({...defaultScheduled(),date:today()})} style={btn("ghost")}>+ Schedule</button>
+        <button onClick={()=>setEditJob(defaultJob())} style={btn("ghost")}>+ Job</button>
+        <button onClick={()=>setImportModal(true)} style={btn("ghost")}>Import</button>
+        <button onClick={exportCSV} style={btn("ghost")}>Export</button>
+      </div>
+    </div>
+
+    {/* Tabs */}
+    <div style={{display:"flex",padding:"0 24px",background:C.sf,borderBottom:`1px solid ${C.bd}`,overflowX:"auto"}}>
+      {[["pipeline","Pipeline"],["scheduled","Scheduled",stats.schedCount,hasOverdue],["contacts","Contacts",contacts.length],["jobs","Jobs",jobs.length],["campaigns","Keep Warm",campaigns.length],["dashboard","Dashboard"]].map(([v,l,c,d])=>
+        <Tab key={v} label={l} count={c} active={view===v} onClick={()=>setView(v)} dot={d}/>)}
+    </div>
+
+    <div style={{padding:24}}>
+
+    {/* PIPELINE */}
+    <div style={{display:view==="pipeline"?"block":"none"}}>
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${STAGES.length},1fr)`,gap:12,overflowX:"auto"}}>
+        {STAGES.map(stage=>{const sc=searchFiltered.filter(c=>c.stage===stage).sort((a,b)=>b.warmthScore-a.warmthScore);
+          return <div key={stage} style={{...card,padding:0,minWidth:170}}>
+            <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.bd}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{width:8,height:8,borderRadius:99,background:stC[stage]}}/><span style={{fontSize:13,fontWeight:600}}>{stage}</span></div><span style={{...bdg(stC[stage]),fontSize:10}}>{sc.length}</span></div>
+            <div style={{padding:8,maxHeight:"60vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:6}}>
+              {sc.map(c=><div key={c.id} onClick={()=>setDetailContact(c)} style={{background:C.sa,borderRadius:8,padding:"10px 12px",cursor:"pointer",border:"1px solid transparent"}} onMouseOver={e=>e.currentTarget.style.borderColor=C.ac} onMouseOut={e=>e.currentTarget.style.borderColor="transparent"}>
+                <div style={{fontSize:13,fontWeight:600,marginBottom:2}}>{c.firstName} {c.lastName}</div>
+                <div style={{fontSize:11,color:C.tm,marginBottom:4}}>{(c.position||"").slice(0,50)}</div>
+                <div style={{fontSize:11,color:C.tm,marginBottom:6}}>{c.company}</div>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}><WarmthDot score={c.warmthScore}/>{c.stage==="Active"&&<span style={{...bdg(c.priority==="High"?C.da:c.priority==="Medium"?C.wa:C.su),fontSize:10}}>{c.priority}</span>}</div>
+              </div>)}
+              {!sc.length&&<div style={{padding:20,textAlign:"center",color:C.tm,fontSize:12}}>No contacts</div>}
+            </div>
+          </div>})}
+      </div>
+    </div>
+
+    {/* SCHEDULED */}
+    <div style={{display:view==="scheduled"?"block":"none"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>Scheduled Activity{hasOverdue&&<span style={{...bdg(C.da),fontSize:11}}>{stats.overdueCount} overdue</span>}</h3>
+        <button onClick={()=>setEditScheduled({...defaultScheduled(),date:today()})} style={btn("primary")}>+ Schedule</button>
+      </div>
+      <div style={{display:"flex",gap:6,marginBottom:16}}>{SCHED_FILTER_CHANNELS.map(ch=><Pill key={ch} label={ch} color={ch==="All"?C.ac:ch==="LinkedIn"?C.ac:ch==="Email"?C.su:ch==="Phone"?C.wa:C.sp} active={schedFilter===ch} onClick={()=>setSchedFilter(ch)}/>)}</div>
+      <div style={{...card,overflow:"hidden"}}>
+        {(()=>{const items=schedFilter==="All"?overdueS:overdueS.filter(s=>s.channel===schedFilter);return items.length?<div><div style={{padding:"8px 14px",background:C.da+"15",fontSize:12,fontWeight:700,color:C.da}}>OVERDUE ({items.length})</div>{items.map(s=><SchedRow key={s.id} item={s}/>)}</div>:null})()}
+        {(()=>{const items=schedFilter==="All"?upcomingS:upcomingS.filter(s=>s.channel===schedFilter);return <div>{items.length>0&&<div style={{padding:"8px 14px",background:C.sa,fontSize:12,fontWeight:700,color:C.tm}}>UPCOMING ({items.length})</div>}{items.map(s=><SchedRow key={s.id} item={s}/>)}</div>})()}
+        {(()=>{const items=schedFilter==="All"?completedS:completedS.filter(s=>s.channel===schedFilter);return items.length?<div><div style={{padding:"8px 14px",background:C.sa,fontSize:12,fontWeight:700,color:C.su}}>COMPLETED ({items.length})</div>{items.slice(0,20).map(s=><SchedRow key={s.id} item={s}/>)}</div>:null})()}
+        {!scheduled.length&&<div style={{padding:40,textAlign:"center",color:C.tm}}>No scheduled activities yet</div>}
+      </div>
+    </div>
+
+    {/* CONTACTS */}
+    <div style={{display:view==="contacts"?"block":"none"}}>
+      <div style={{display:"flex",gap:6,marginBottom:16,flexWrap:"wrap"}}><Pill label="All" color={C.ac} active={stageFilter==="All"} onClick={()=>setStageFilter("All")}/>{STAGES.map(s=><Pill key={s} label={s} color={stC[s]} active={stageFilter===s} onClick={()=>setStageFilter(s)}/>)}</div>
+      <div style={{...card,overflow:"hidden"}}><div style={{overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12,minWidth:900}}>
+          <thead><tr style={{background:C.sa}}>{["Name","Position","Company","Stage","Priority","Warmth","Email","Phone","Segment",""].map(h=><th key={h} style={{padding:"10px 12px",textAlign:"left",fontSize:11,fontWeight:600,color:C.tm,textTransform:"uppercase",borderBottom:`1px solid ${C.bd}`}}>{h}</th>)}</tr></thead>
+          <tbody>{filtered.map(c=><tr key={c.id} style={{borderBottom:`1px solid ${C.bd}`,cursor:"pointer"}} onMouseOver={e=>e.currentTarget.style.background=C.sa} onMouseOut={e=>e.currentTarget.style.background="transparent"}>
+            <td style={{padding:"10px 12px"}} onClick={()=>setDetailContact(c)}><span style={{fontWeight:600}}>{c.firstName} {c.lastName}</span></td>
+            <td style={{padding:"10px 12px",color:C.tm,maxWidth:200,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.position}</td>
+            <td style={{padding:"10px 12px"}}>{c.company}</td>
+            <td style={{padding:"10px 12px"}}><span style={bdg(stC[c.stage])}>{c.stage}</span></td>
+            <td style={{padding:"10px 12px"}}>{c.stage==="Active"?<span style={{...bdg(c.priority==="High"?C.da:c.priority==="Medium"?C.wa:C.su)}}>{c.priority}</span>:"—"}</td>
+            <td style={{padding:"10px 12px"}}><WarmthDot score={c.warmthScore}/></td>
+            <td style={{padding:"10px 12px",color:c.email?C.su:C.tm}}>{c.email?"✓":"—"}</td>
+            <td style={{padding:"10px 12px",color:c.phone?C.su:C.tm}}>{c.phone?"✓":"—"}</td>
+            <td style={{padding:"10px 12px",color:C.tm}}>{c.segment}</td>
+            <td style={{padding:"10px 12px",whiteSpace:"nowrap"}}><button onClick={e=>{e.stopPropagation();setEditContact({...c})}} style={{...btn("ghost"),padding:"4px 10px",fontSize:11,marginRight:4}}>Edit</button><button onClick={e=>{e.stopPropagation();if(confirm("Delete?"))deleteContact(c.id)}} style={{...btn("ghost"),padding:"4px 10px",fontSize:11,color:C.da}}>✕</button></td>
+          </tr>)}</tbody>
+        </table></div>
+        {!filtered.length&&<div style={{padding:40,textAlign:"center",color:C.tm}}>No contacts match filters</div>}
+      </div>
+    </div>
+
+    {/* JOBS */}
+    <div style={{display:view==="jobs"?"block":"none"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,fontWeight:700}}>Job Tracker</h3>
+        <div style={{display:"flex",gap:8}}><button onClick={exportJobs} style={btn("ghost")}>Export Jobs</button><button onClick={()=>setEditJob(defaultJob())} style={btn("primary")}>+ Job</button></div>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:`repeat(${JOB_STATUSES.length},1fr)`,gap:12}}>
+        {JOB_STATUSES.map(status=>{const sj=jobs.filter(j=>j.status===status);const sc={New:C.ac,Applied:C.wa,Interview:C.sp,Offer:C.su,Closed:C.tm};
+          return <div key={status} style={{...card,padding:0}}>
+            <div style={{padding:"12px 14px",borderBottom:`1px solid ${C.bd}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}><span style={{fontSize:13,fontWeight:600,display:"flex",alignItems:"center",gap:8}}><span style={{width:8,height:8,borderRadius:99,background:sc[status]}}/>{status}</span><span style={{...bdg(sc[status]),fontSize:10}}>{sj.length}</span></div>
+            <div style={{padding:8,maxHeight:"60vh",overflowY:"auto",display:"flex",flexDirection:"column",gap:6}}>
+              {sj.map(j=>{const c=contacts.find(x=>x.id===j.contactId);return <div key={j.id} style={{background:C.sa,borderRadius:8,padding:"10px 12px",cursor:"pointer"}} onClick={()=>setEditJob({...j})}>
+                <div style={{fontSize:13,fontWeight:600,marginBottom:2}}>{j.jobTitle||"Untitled"}</div><div style={{fontSize:12,color:C.tm}}>{j.company}</div>
+                {j.remuneration&&<div style={{fontSize:11,color:C.su}}>{j.remuneration}</div>}{c&&<div style={{fontSize:11,color:C.ac}}>via {c.firstName} {c.lastName}</div>}
+              </div>})}{!sj.length&&<div style={{padding:20,textAlign:"center",color:C.tm,fontSize:12}}>None</div>}
+            </div></div>})}
+      </div>
+    </div>
+
+    {/* CAMPAIGNS */}
+    <div style={{display:view==="campaigns"?"block":"none"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+        <h3 style={{margin:0,fontSize:16,fontWeight:700}}>Keep Warm Campaigns</h3>
+        <button onClick={()=>setEditCampaign({id:uid(),name:"",segment:"General",interval:"Monthly",channel:"Email",messageTemplate:"",active:true})} style={btn("primary")}>+ Campaign</button>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(320,1fr))",gap:12}}>
+        {campaigns.map(camp=>{const elig=contacts.filter(c=>c.segment===camp.segment&&!["Inactive","Do Not Contact"].includes(c.stage));const due=elig.filter(c=>{const la=activities.filter(a=>a.contactId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0];return(la?daysSince(la.date):999)>=(KEEP_WARM_INTERVALS[camp.interval]||30)});
+          return <div key={camp.id} style={{...card,padding:16}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}><div><div style={{fontSize:15,fontWeight:700}}>{camp.name||"Unnamed"}</div><div style={{fontSize:12,color:C.tm}}>{camp.segment} · {camp.interval} · {camp.channel}</div></div><span style={{...bdg(camp.active?C.su:C.tm)}}>{camp.active?"Active":"Paused"}</span></div>
+            <div style={{display:"flex",gap:16,marginBottom:12}}><div><div style={{fontSize:20,fontWeight:700,color:C.ac}}>{elig.length}</div><div style={{fontSize:11,color:C.tm}}>Eligible</div></div><div><div style={{fontSize:20,fontWeight:700,color:C.wa}}>{due.length}</div><div style={{fontSize:11,color:C.tm}}>Due</div></div></div>
+            <div style={{display:"flex",gap:6}}><button onClick={()=>setEditCampaign({...camp})} style={{...btn("ghost"),fontSize:11,padding:"4px 12px"}}>Edit</button><button onClick={()=>setCampaigns(p=>p.map(x=>x.id===camp.id?{...x,active:!x.active}:x))} style={{...btn("ghost"),fontSize:11,padding:"4px 12px"}}>{camp.active?"Pause":"Resume"}</button><button onClick={()=>{if(confirm("Delete?"))setCampaigns(p=>p.filter(x=>x.id!==camp.id))}} style={{...btn("ghost"),fontSize:11,padding:"4px 12px",color:C.da}}>Delete</button></div>
+          </div>})}
+        {!campaigns.length&&<div style={{...card,padding:40,textAlign:"center",color:C.tm,gridColumn:"1/-1"}}><div style={{fontSize:14,marginBottom:8}}>No campaigns yet</div></div>}
+      </div>
+    </div>
+
+    {/* DASHBOARD */}
+    <div style={{display:view==="dashboard"?"block":"none"}}>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140,1fr))",gap:12,marginBottom:20}}>
+        {[["Total",stats.total,C.ac],["Emails",stats.emailsCaptured,C.su],["Scheduled",stats.schedCount,C.ac],["Overdue",stats.overdueCount,C.da],["Active Hi",stats.activeHigh,C.da],["Active Med",stats.activeMed,C.wa],["Active Lo",stats.activeLow,C.su],["Jobs",stats.totalJobs-(stats.jobsByStatus.Closed||0),C.ac]].map(([l,v,c])=>
+          <div key={l} style={{...card,padding:16,textAlign:"center"}}><div style={{fontSize:28,fontWeight:700,color:c}}>{v}</div><div style={{fontSize:11,color:C.tm,marginTop:4}}>{l}</div></div>)}
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:20}}>
+        <div style={{...card,padding:16}}><h4 style={{margin:"0 0 14px",fontSize:14,fontWeight:700}}>Pipeline</h4>
+          {STAGES.map(s=>{const c=stats.byStage[s];const pct=stats.total?Math.round(c/stats.total*100):0;return <div key={s} style={{marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}><span style={{display:"flex",alignItems:"center",gap:6}}><span style={{width:8,height:8,borderRadius:99,background:stC[s]}}/>{s}</span><span style={{color:C.tm}}>{c} ({pct}%)</span></div><div style={{height:6,background:C.sa,borderRadius:99}}><div style={{height:6,borderRadius:99,background:stC[s],width:`${pct}%`}}/></div></div>})}
+        </div>
+        <div style={{...card,padding:16}}><h4 style={{margin:"0 0 14px",fontSize:14,fontWeight:700}}>Warmth</h4>
+          {["Hot","Warm","Moderate","Cool","Cold","Unscored"].map(w=>{const c=stats.warmthDist[w]||0;const pct=stats.total?Math.round(c/stats.total*100):0;return <div key={w} style={{marginBottom:8}}><div style={{display:"flex",justifyContent:"space-between",fontSize:12,marginBottom:3}}><span style={{color:WARMTH_COLORS[w],fontWeight:600}}>{w}</span><span style={{color:C.tm}}>{c} ({pct}%)</span></div><div style={{height:6,background:C.sa,borderRadius:99}}><div style={{height:6,borderRadius:99,background:WARMTH_COLORS[w],width:`${pct}%`}}/></div></div>})}
+        </div>
+      </div>
+
+      {/* Cloud Sync */}
+      <div style={{...card,padding:20,marginBottom:20}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div>
+            <h4 style={{margin:0,fontSize:15,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>Cloud Sync <span style={{...bdg(syncStatus==="success"?C.su:syncStatus==="error"?C.da:syncStatus==="syncing"?C.wa:C.tm),fontSize:10}}>{syncStatus==="syncing"?"Syncing...":syncStatus==="success"?"Connected":syncStatus==="error"?"Error":"Supabase"}</span></h4>
+            {lastSync&&<div style={{fontSize:11,color:C.tm,marginTop:4}}>Last sync: {lastSync}</div>}
+          </div>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={testConn} disabled={syncStatus==="syncing"} style={{...btn("ghost"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Test</button>
+            <button onClick={pullFromCloud} disabled={syncStatus==="syncing"} style={{...btn("ghost"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Pull from Cloud</button>
+            <button onClick={pushToCloud} disabled={syncStatus==="syncing"} style={{...btn("primary"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Push to Cloud</button>
+          </div>
+        </div>
+        {syncMsg&&<div style={{background:C.sa,borderRadius:6,padding:10,fontSize:12,color:syncStatus==="error"?C.da:syncStatus==="success"?C.su:C.tx,borderLeft:`3px solid ${syncStatus==="error"?C.da:syncStatus==="success"?C.su:C.ac}`}}>{syncMsg}</div>}
+        <div style={{marginTop:12,fontSize:11,color:C.tm}}><b>Push</b> uploads local → cloud (overwrites cloud). <b>Pull</b> downloads cloud → local (overwrites local).</div>
+      </div>
+
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <button onClick={exportCSV} style={btn("ghost")}>Export Contacts CSV</button>
+        <button onClick={exportJobs} style={btn("ghost")}>Export Jobs CSV</button>
+        <button onClick={()=>setConfirmReset(true)} style={{...btn("ghost"),color:C.da}}>Reset All Data</button>
+      </div>
+    </div>
+
+    </div>
+
+    {/* ═══ MODALS ═══ */}
+    <Modal open={!!editContact} onClose={()=>setEditContact(null)} title={editContact?.firstName?"Edit Contact":"New Contact"} width={560}>
+      {editContact&&<div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Field label="First Name"><input style={inp} value={editContact.firstName} onChange={e=>setEditContact({...editContact,firstName:e.target.value})}/></Field><Field label="Last Name"><input style={inp} value={editContact.lastName} onChange={e=>setEditContact({...editContact,lastName:e.target.value})}/></Field></div>
+        <Field label="Position"><input style={inp} value={editContact.position} onChange={e=>setEditContact({...editContact,position:e.target.value})}/></Field>
+        <Field label="Company"><input style={inp} value={editContact.company} onChange={e=>setEditContact({...editContact,company:e.target.value})}/></Field>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Field label="LinkedIn URL"><input style={inp} value={editContact.linkedinUrl} onChange={e=>setEditContact({...editContact,linkedinUrl:e.target.value})}/></Field><Field label="Email"><input style={inp} value={editContact.email} onChange={e=>setEditContact({...editContact,email:e.target.value})}/></Field></div>
+        <Field label="Phone"><input style={inp} value={editContact.phone||""} onChange={e=>setEditContact({...editContact,phone:e.target.value})} placeholder="+44 7700 000000"/></Field>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}><Field label="Stage"><select style={inp} value={editContact.stage} onChange={e=>setEditContact({...editContact,stage:e.target.value})}>{STAGES.map(s=><option key={s}>{s}</option>)}</select></Field><Field label="Priority"><select style={inp} value={editContact.priority} onChange={e=>setEditContact({...editContact,priority:e.target.value})}>{PRIORITIES.map(p=><option key={p}>{p}</option>)}</select></Field><Field label="Warmth (0-5)"><input type="number" min={0} max={5} style={inp} value={editContact.warmthScore} onChange={e=>setEditContact({...editContact,warmthScore:parseInt(e.target.value)||0})}/></Field></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Field label="Segment"><select style={inp} value={editContact.segment} onChange={e=>setEditContact({...editContact,segment:e.target.value})}>{segments.map(s=><option key={s}>{s}</option>)}</select></Field><Field label="Connected On"><input style={inp} value={editContact.connectedOn} onChange={e=>setEditContact({...editContact,connectedOn:e.target.value})}/></Field></div>
+        <Field label="Notes"><textarea style={{...inp,minHeight:60}} value={editContact.notes} onChange={e=>setEditContact({...editContact,notes:e.target.value})}/></Field>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}><button onClick={()=>setEditContact(null)} style={btn("ghost")}>Cancel</button><button onClick={()=>saveContact(editContact)} style={btn("primary")}>Save</button></div>
+      </div>}
+    </Modal>
+
+    <Modal open={!!detailContact} onClose={()=>setDetailContact(null)} title="Contact Detail" width={640}>
+      {detailContact&&(()=>{const c=contacts.find(x=>x.id===detailContact.id)||detailContact;const ca=activities.filter(a=>a.contactId===c.id).sort((a,b)=>b.date.localeCompare(a.date));const cs=scheduled.filter(s=>s.contactId===c.id&&!s.completed);const cj=jobs.filter(j=>j.contactId===c.id);
+        return <div>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"start",marginBottom:16}}>
+            <div><div style={{fontSize:20,fontWeight:700}}>{c.firstName} {c.lastName}</div><div style={{fontSize:13,color:C.tm}}>{c.position}</div><div style={{fontSize:13,color:C.tm}}>{c.company}</div></div>
+            <div style={{textAlign:"right"}}><WarmthDot score={c.warmthScore}/><div style={{marginTop:6}}><span style={bdg(stC[c.stage])}>{c.stage}</span></div>{c.stage==="Active"&&<div style={{marginTop:4}}><span style={{...bdg(c.priority==="High"?C.da:c.priority==="Medium"?C.wa:C.su)}}>{c.priority}</span></div>}</div>
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginBottom:16,fontSize:12}}>
+            {c.email&&<div><span style={{color:C.tm}}>Email:</span> <a href={`mailto:${c.email}`} style={{color:C.ac}}>{c.email}</a></div>}
+            {c.phone&&<div><span style={{color:C.tm}}>Phone:</span> <a href={`tel:${c.phone}`} style={{color:C.ac}}>{c.phone}</a></div>}
+            {c.linkedinUrl&&<div><span style={{color:C.tm}}>LinkedIn:</span> <a href={c.linkedinUrl} target="_blank" style={{color:C.ac}}>Profile ↗</a></div>}
+            <div><span style={{color:C.tm}}>Segment:</span> {c.segment}</div>
+          </div>
+          {c.notes&&<div style={{background:C.sa,borderRadius:6,padding:10,fontSize:12,color:C.tm,marginBottom:16}}>{c.notes}</div>}
+          <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
+            <button onClick={()=>{setDetailContact(null);setEditContact({...c})}} style={{...btn("ghost"),fontSize:11}}>Edit</button>
+            <button onClick={()=>setEditActivity({...defaultActivity(),contactId:c.id})} style={{...btn("ghost"),fontSize:11}}>+ Activity</button>
+            <button onClick={()=>setEditScheduled({...defaultScheduled(),contactId:c.id,date:today()})} style={{...btn("primary"),fontSize:11}}>+ Schedule</button>
+            <button onClick={()=>setEditJob({...defaultJob(),contactId:c.id})} style={{...btn("ghost"),fontSize:11}}>+ Job</button>
+            <button onClick={()=>{if(confirm("Delete?"))deleteContact(c.id)}} style={{...btn("ghost"),fontSize:11,color:C.da}}>Delete</button>
+          </div>
+          {cs.length>0&&<div style={{marginBottom:16}}><h4 style={{fontSize:13,fontWeight:700,color:C.ac,marginBottom:8}}>Scheduled ({cs.length})</h4>{cs.map(s=><SchedRow key={s.id} item={s} showContact={false}/>)}</div>}
+          {cj.length>0&&<div style={{marginBottom:16}}><h4 style={{fontSize:13,fontWeight:700,marginBottom:8}}>Jobs ({cj.length})</h4>{cj.map(j=><div key={j.id} style={{background:C.sa,borderRadius:6,padding:10,marginBottom:6,display:"flex",justifyContent:"space-between",cursor:"pointer"}} onClick={()=>setEditJob({...j})}><div><div style={{fontSize:12,fontWeight:600}}>{j.jobTitle} — {j.company}</div>{j.remuneration&&<div style={{fontSize:11,color:C.su}}>{j.remuneration}</div>}</div><span style={{...bdg(j.status==="Interview"?C.sp:j.status==="Applied"?C.wa:j.status==="Offer"?C.su:j.status==="Closed"?C.tm:C.ac),fontSize:10}}>{j.status}</span></div>)}</div>}
+          <h4 style={{fontSize:13,fontWeight:700,marginBottom:8}}>Activity Log ({ca.length})</h4>
+          <div style={{maxHeight:250,overflowY:"auto"}}>{ca.map(a=><div key={a.id} style={{padding:"8px 0",borderBottom:`1px solid ${C.bd}`,display:"flex",justifyContent:"space-between"}}><div><div style={{fontSize:12}}><b>{a.type}</b> via <span style={{color:C.ac}}>{a.channel}</span></div>{a.notes&&<div style={{fontSize:11,color:C.tm}}>{a.notes}</div>}{a.outcome&&<div style={{fontSize:11,color:C.su}}>→ {a.outcome}</div>}</div><div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:11,color:C.tm}}>{fmt(a.date)}</span><button onClick={()=>deleteActivity(a.id)} style={{...btn("ghost"),padding:"2px 6px",fontSize:10,color:C.da}}>✕</button></div></div>)}{!ca.length&&<div style={{padding:20,textAlign:"center",color:C.tm,fontSize:12}}>No activity yet</div>}</div>
+        </div>})()}
+    </Modal>
+
+    <Modal open={!!editActivity} onClose={()=>setEditActivity(null)} title="Log Activity">
+      {editActivity&&<div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}><Field label="Date"><input type="date" style={inp} value={editActivity.date} onChange={e=>setEditActivity({...editActivity,date:e.target.value})}/></Field><Field label="Channel"><select style={inp} value={editActivity.channel} onChange={e=>setEditActivity({...editActivity,channel:e.target.value})}>{CHANNELS.map(c=><option key={c}>{c}</option>)}</select></Field><Field label="Type"><select style={inp} value={editActivity.type} onChange={e=>setEditActivity({...editActivity,type:e.target.value})}>{ACTIVITY_TYPES.map(t=><option key={t}>{t}</option>)}</select></Field></div>
+        <Field label="Notes"><textarea style={{...inp,minHeight:60}} value={editActivity.notes} onChange={e=>setEditActivity({...editActivity,notes:e.target.value})}/></Field>
+        <Field label="Outcome"><input style={inp} value={editActivity.outcome} onChange={e=>setEditActivity({...editActivity,outcome:e.target.value})}/></Field>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}><button onClick={()=>setEditActivity(null)} style={btn("ghost")}>Cancel</button><button onClick={()=>saveActivity(editActivity)} style={btn("primary")}>Save</button></div>
+      </div>}
+    </Modal>
+
+    <Modal open={!!editScheduled} onClose={()=>setEditScheduled(null)} title="Schedule Activity">
+      {editScheduled&&<div>
+        <Field label="Contact"><select style={inp} value={editScheduled.contactId} onChange={e=>setEditScheduled({...editScheduled,contactId:e.target.value})}><option value="">— Select —</option>{[...contacts].sort((a,b)=>(a.lastName||"").localeCompare(b.lastName||"")).map(c=><option key={c.id} value={c.id}>{c.firstName} {c.lastName} — {c.company}</option>)}</select></Field>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Field label="Date"><input type="date" style={inp} value={editScheduled.date} onChange={e=>setEditScheduled({...editScheduled,date:e.target.value})}/></Field><Field label="Time"><input type="time" style={inp} value={editScheduled.time} onChange={e=>setEditScheduled({...editScheduled,time:e.target.value})}/></Field></div>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}><Field label="Channel"><select style={inp} value={editScheduled.channel} onChange={e=>setEditScheduled({...editScheduled,channel:e.target.value})}>{CHANNELS.map(c=><option key={c}>{c}</option>)}</select></Field><Field label="Type"><select style={inp} value={editScheduled.type} onChange={e=>setEditScheduled({...editScheduled,type:e.target.value})}>{ACTIVITY_TYPES.map(t=><option key={t}>{t}</option>)}</select></Field></div>
+        <Field label="Objective"><input style={inp} placeholder="e.g. Intro call, Chase feedback" value={editScheduled.objective} onChange={e=>setEditScheduled({...editScheduled,objective:e.target.value})}/></Field>
+        <Field label="Notes"><textarea style={{...inp,minHeight:40}} value={editScheduled.notes||""} onChange={e=>setEditScheduled({...editScheduled,notes:e.target.value})}/></Field>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}>{editScheduled.objective&&<button onClick={()=>{if(confirm("Delete?"))deleteScheduledItem(editScheduled.id);setEditScheduled(null)}} style={btn("danger")}>Delete</button>}<button onClick={()=>setEditScheduled(null)} style={btn("ghost")}>Cancel</button><button onClick={()=>saveScheduledItem(editScheduled)} style={btn("primary")}>Save</button></div>
+      </div>}
+    </Modal>
+
+    <Modal open={!!editJob} onClose={()=>setEditJob(null)} title={editJob?.jobTitle?"Edit Job":"New Job"}>
+      {editJob&&<div>
+        <Field label="Contact"><select style={inp} value={editJob.contactId} onChange={e=>setEditJob({...editJob,contactId:e.target.value})}><option value="">— Select —</option>{[...contacts].sort((a,b)=>(a.lastName||"").localeCompare(b.lastName||"")).map(c=><option key={c.id} value={c.id}>{c.firstName} {c.lastName} — {c.company}</option>)}</select></Field>
+        <Field label="Job Title"><input style={inp} value={editJob.jobTitle} onChange={e=>setEditJob({...editJob,jobTitle:e.target.value})}/></Field>
+        <Field label="Company"><input style={inp} value={editJob.company} onChange={e=>setEditJob({...editJob,company:e.target.value})}/></Field>
+        <Field label="Remuneration"><input style={inp} placeholder="£120k-£150k + bonus" value={editJob.remuneration} onChange={e=>setEditJob({...editJob,remuneration:e.target.value})}/></Field>
+        <Field label="Summary"><textarea style={{...inp,minHeight:80}} value={editJob.roleSummary} onChange={e=>setEditJob({...editJob,roleSummary:e.target.value})}/></Field>
+        <Field label="Status"><select style={inp} value={editJob.status} onChange={e=>setEditJob({...editJob,status:e.target.value})}>{JOB_STATUSES.map(s=><option key={s}>{s}</option>)}</select></Field>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}>{editJob.jobTitle&&<button onClick={()=>{if(confirm("Delete?"))deleteJob(editJob.id);setEditJob(null)}} style={btn("danger")}>Delete</button>}<button onClick={()=>setEditJob(null)} style={btn("ghost")}>Cancel</button><button onClick={()=>saveJob(editJob)} style={btn("primary")}>Save</button></div>
+      </div>}
+    </Modal>
+
+    <Modal open={!!editCampaign} onClose={()=>setEditCampaign(null)} title={editCampaign?.name?"Edit Campaign":"New Campaign"}>
+      {editCampaign&&<div>
+        <Field label="Name"><input style={inp} value={editCampaign.name} onChange={e=>setEditCampaign({...editCampaign,name:e.target.value})}/></Field>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12}}><Field label="Segment"><select style={inp} value={editCampaign.segment} onChange={e=>setEditCampaign({...editCampaign,segment:e.target.value})}>{segments.map(s=><option key={s}>{s}</option>)}</select></Field><Field label="Interval"><select style={inp} value={editCampaign.interval} onChange={e=>setEditCampaign({...editCampaign,interval:e.target.value})}>{Object.keys(KEEP_WARM_INTERVALS).map(i=><option key={i}>{i}</option>)}</select></Field><Field label="Channel"><select style={inp} value={editCampaign.channel} onChange={e=>setEditCampaign({...editCampaign,channel:e.target.value})}>{CHANNELS.map(c=><option key={c}>{c}</option>)}</select></Field></div>
+        <Field label="Template"><textarea style={{...inp,minHeight:80}} value={editCampaign.messageTemplate} onChange={e=>setEditCampaign({...editCampaign,messageTemplate:e.target.value})}/></Field>
+        <div style={{display:"flex",gap:8,justifyContent:"flex-end",marginTop:8}}><button onClick={()=>setEditCampaign(null)} style={btn("ghost")}>Cancel</button><button onClick={()=>saveCampaign(editCampaign)} style={btn("primary")}>Save</button></div>
+      </div>}
+    </Modal>
+
+    <Modal open={importModal} onClose={()=>setImportModal(false)} title="Import CSV">
+      <p style={{fontSize:12,color:C.tm,marginBottom:16}}>Upload CSV with headers. Auto-maps: First Name, Last Name, Position, Company, LinkedIn URL, Email, Phone, Stage, Priority, Warmth Score, Segment, Notes.</p>
+      <input type="file" accept=".csv" style={{fontSize:12,color:C.tx}} onChange={e=>{const f=e.target.files[0];if(f){const r=new FileReader();r.onload=ev=>handleImport(ev.target.result);r.readAsText(f)}}}/>
+    </Modal>
+
+    <Modal open={confirmReset} onClose={()=>setConfirmReset(false)} title="Reset All Data?" width={400}>
+      <p style={{fontSize:13,color:C.tm,marginBottom:16}}>This deletes all local data. Cloud data in Supabase is not affected.</p>
+      <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}><button onClick={()=>setConfirmReset(false)} style={btn("ghost")}>Cancel</button><button onClick={handleReset} style={btn("danger")}>Delete Local Data</button></div>
+    </Modal>
+  </div>;
+}
+
+ReactDOM.render(<App/>, document.getElementById("root"));
+</script>
+</body>
+</html>
