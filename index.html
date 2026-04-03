@@ -98,20 +98,57 @@ function App(){
   const [syncStatus,setSyncStatus]=useState("idle");
   const [syncMsg,setSyncMsg]=useState("");
   const [lastSync,setLastSync]=useState(null);
+  const [autoSyncEnabled,setAutoSyncEnabled]=useState(true);
+  const pushTimer=useRef(null);
+  const initialLoad=useRef(true);
 
-  // Load from localStorage
+  // Auto-pull from Supabase on first load
   useEffect(()=>{
-    const c=lsGet("crm-contacts"),a=lsGet("crm-activities"),s=lsGet("crm-scheduled"),j=lsGet("crm-jobs"),cm=lsGet("crm-campaigns"),ls=lsGet("crm-lastSync");
-    if(c)setContacts(c);if(a)setActivities(a);if(s)setScheduled(s);if(j)setJobs(j);if(cm)setCampaigns(cm);if(ls)setLastSync(ls);
-    setLoaded(true);
+    (async()=>{
+      const ls=lsGet("crm-lastSync");if(ls)setLastSync(ls);
+      try{
+        setSyncStatus("syncing");setSyncMsg("Loading from cloud...");
+        const[c,a,s,j,cm]=await Promise.all(TABLES.map(t=>supaRead(t)));
+        if(c&&c.length>0)setContacts(c);else{const lc=lsGet("crm-contacts");if(lc)setContacts(lc)}
+        if(a&&a.length>0)setActivities(a);else{const la=lsGet("crm-activities");if(la)setActivities(la)}
+        if(s&&s.length>0)setScheduled(s);else{const ls2=lsGet("crm-scheduled");if(ls2)setScheduled(ls2)}
+        if(j&&j.length>0)setJobs(j);else{const lj=lsGet("crm-jobs");if(lj)setJobs(lj)}
+        if(cm&&cm.length>0)setCampaigns(cm);else{const lcm=lsGet("crm-campaigns");if(lcm)setCampaigns(lcm)}
+        const now=new Date().toLocaleString("en-GB");setLastSync(now);lsSet("crm-lastSync",now);
+        setSyncStatus("success");setSyncMsg("Loaded from cloud");
+      }catch(e){
+        console.warn("Cloud pull failed, loading from local:",e.message);
+        const c=lsGet("crm-contacts"),a=lsGet("crm-activities"),s=lsGet("crm-scheduled"),j=lsGet("crm-jobs"),cm=lsGet("crm-campaigns");
+        if(c)setContacts(c);if(a)setActivities(a);if(s)setScheduled(s);if(j)setJobs(j);if(cm)setCampaigns(cm);
+        setSyncStatus("error");setSyncMsg("Offline — loaded from local cache");
+      }
+      setLoaded(true);
+      setTimeout(()=>{initialLoad.current=false},1000);
+    })();
   },[]);
 
-  // Save to localStorage
+  // Save to localStorage always
   useEffect(()=>{if(loaded)lsSet("crm-contacts",contacts)},[contacts,loaded]);
   useEffect(()=>{if(loaded)lsSet("crm-activities",activities)},[activities,loaded]);
   useEffect(()=>{if(loaded)lsSet("crm-scheduled",scheduled)},[scheduled,loaded]);
   useEffect(()=>{if(loaded)lsSet("crm-jobs",jobs)},[jobs,loaded]);
   useEffect(()=>{if(loaded)lsSet("crm-campaigns",campaigns)},[campaigns,loaded]);
+
+  // Auto-push to Supabase (debounced 2 seconds after last change)
+  useEffect(()=>{
+    if(!loaded||initialLoad.current||!autoSyncEnabled)return;
+    if(pushTimer.current)clearTimeout(pushTimer.current);
+    pushTimer.current=setTimeout(async()=>{
+      try{
+        setSyncStatus("syncing");setSyncMsg("Auto-saving to cloud...");
+        const data={contacts,activities,scheduled,jobs,campaigns};
+        for(const t of TABLES){await supaDeleteAll(t);if(data[t]&&data[t].length>0){for(let i=0;i<data[t].length;i+=100)await supaUpsert(t,data[t].slice(i,i+100))}}
+        const now=new Date().toLocaleString("en-GB");setLastSync(now);lsSet("crm-lastSync",now);
+        setSyncStatus("success");setSyncMsg("Auto-saved to cloud");
+      }catch(e){setSyncStatus("error");setSyncMsg("Auto-save failed: "+e.message)}
+    },2000);
+    return()=>{if(pushTimer.current)clearTimeout(pushTimer.current)};
+  },[contacts,activities,scheduled,jobs,campaigns,loaded,autoSyncEnabled]);
 
   // CRUD
   const saveContact=c=>{setContacts(p=>{const i=p.findIndex(x=>x.id===c.id);return i>=0?p.map(x=>x.id===c.id?c:x):[...p,c]});setEditContact(null)};
@@ -369,17 +406,26 @@ function App(){
       <div style={{...card,padding:20,marginBottom:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
           <div>
-            <h4 style={{margin:0,fontSize:15,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>Cloud Sync <span style={{...bdg(syncStatus==="success"?C.su:syncStatus==="error"?C.da:syncStatus==="syncing"?C.wa:C.tm),fontSize:10}}>{syncStatus==="syncing"?"Syncing...":syncStatus==="success"?"Connected":syncStatus==="error"?"Error":"Supabase"}</span></h4>
+            <h4 style={{margin:0,fontSize:15,fontWeight:700,display:"flex",alignItems:"center",gap:8}}>Cloud Sync
+              <span style={{...bdg(syncStatus==="success"?C.su:syncStatus==="error"?C.da:syncStatus==="syncing"?C.wa:C.tm),fontSize:10}}>{syncStatus==="syncing"?"Syncing...":syncStatus==="success"?"Synced":syncStatus==="error"?"Error":"Idle"}</span>
+              {autoSyncEnabled&&<span style={{...bdg(C.su),fontSize:10}}>Auto</span>}
+            </h4>
             {lastSync&&<div style={{fontSize:11,color:C.tm,marginTop:4}}>Last sync: {lastSync}</div>}
           </div>
-          <div style={{display:"flex",gap:8}}>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <label style={{display:"flex",alignItems:"center",gap:6,fontSize:11,color:C.tm,cursor:"pointer"}}>
+              <span onClick={()=>setAutoSyncEnabled(!autoSyncEnabled)} style={{width:36,height:20,borderRadius:10,background:autoSyncEnabled?C.su:C.sa,position:"relative",cursor:"pointer",transition:"background 0.2s",border:`1px solid ${C.bd}`}}>
+                <span style={{width:16,height:16,borderRadius:8,background:"#fff",position:"absolute",top:1,left:autoSyncEnabled?18:1,transition:"left 0.2s"}}/>
+              </span>
+              Auto-sync
+            </label>
             <button onClick={testConn} disabled={syncStatus==="syncing"} style={{...btn("ghost"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Test</button>
-            <button onClick={pullFromCloud} disabled={syncStatus==="syncing"} style={{...btn("ghost"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Pull from Cloud</button>
-            <button onClick={pushToCloud} disabled={syncStatus==="syncing"} style={{...btn("primary"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Push to Cloud</button>
+            <button onClick={pullFromCloud} disabled={syncStatus==="syncing"} style={{...btn("ghost"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Pull</button>
+            <button onClick={pushToCloud} disabled={syncStatus==="syncing"} style={{...btn("primary"),fontSize:11,opacity:syncStatus==="syncing"?0.5:1}}>Push</button>
           </div>
         </div>
         {syncMsg&&<div style={{background:C.sa,borderRadius:6,padding:10,fontSize:12,color:syncStatus==="error"?C.da:syncStatus==="success"?C.su:C.tx,borderLeft:`3px solid ${syncStatus==="error"?C.da:syncStatus==="success"?C.su:C.ac}`}}>{syncMsg}</div>}
-        <div style={{marginTop:12,fontSize:11,color:C.tm}}><b>Push</b> uploads local → cloud (overwrites cloud). <b>Pull</b> downloads cloud → local (overwrites local).</div>
+        <div style={{marginTop:12,fontSize:11,color:C.tm}}>{autoSyncEnabled?"Changes auto-save to Supabase 2 seconds after each edit. Data auto-loads from cloud on startup.":"Auto-sync is paused. Use Push/Pull buttons to sync manually."}</div>
       </div>
 
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
